@@ -16,6 +16,13 @@ def run_web_server():
 
 @bot.message_handler(commands=['roll', 'dice'])
 def send_dice(message):
+    # Отримуємо ім'я користувача
+    user_name = message.from_user.first_name
+    
+    # Відправляємо текст, хто кидає
+    bot.send_message(message.chat.id, f"🎲 {user_name} кидає кубик:")
+    
+    # Відправляємо сам кубик
     bot.send_dice(message.chat.id)
 
 if __name__ == "__main__":
