@@ -16,42 +16,44 @@ def home():
 def run_web_server():
     app.run(host='0.0.0.0', port=8080)
 
-# Функція для кнопок (Inline + Клавіатурна)
-def get_keyboards():
-    # Кнопка під повідомленням
-    inline = types.InlineKeyboardMarkup()
-    inline.add(types.InlineKeyboardButton("🎲 Кинути кубик", callback_data="roll_dice"))
-    
-    # Кнопка внизу (клавіатурна)
-    reply = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    reply.add(types.KeyboardButton("🎲 Кинути кубик"))
-    
-    return inline, reply
+# Кнопка під повідомленням
+def get_inline_keyboard():
+    markup = types.InlineKeyboardMarkup()
+    btn = types.InlineKeyboardButton("🎲 Кинути ще раз", callback_data="roll_dice")
+    markup.add(btn)
+    return markup
 
 @bot.message_handler(commands=['start', 'roll'])
 def welcome(message):
-    inline, reply = get_keyboards()
-    bot.send_message(message.chat.id, "Натисніть кнопку:", reply_markup=reply)
-    bot.send_message(message.chat.id, "Або цю:", reply_markup=inline)
+    bot.send_message(
+        message.chat.id, 
+        "Привіт! Натискай кнопку нижче, щоб випробувати удачу:", 
+        reply_markup=get_inline_keyboard()
+    )
 
-# Обробка натискання на кнопку ПІД повідомленням
 @bot.callback_query_handler(func=lambda call: call.data == "roll_dice")
 def callback_roll(call):
-    process_roll(call.message, call.from_user.first_name)
+    user_name = call.from_user.first_name
+    
+    # 1. Ефект "Бот друкує..." (поки крутиться кубик)
+    bot.send_chat_action(call.message.chat.id, 'typing')
+    
+    # 2. Кидаємо кубик
+    dice_msg = bot.send_dice(call.message.chat.id)
+    
+    # Прибираємо годинник на кнопці
     bot.answer_callback_query(call.id)
-
-# Обробка натискання на кнопку ВНИЗУ (текстова)
-@bot.message_handler(func=lambda message: message.text == "🎲 Кинути кубик")
-def text_roll(message):
-    process_roll(message, message.from_user.first_name)
-
-# Спільна логіка кидка
-def process_roll(message, name):
-    inline, _ = get_keyboards()
-    dice_msg = bot.send_dice(message.chat.id)
+    
+    # 3. Пауза на анімацію (3.5 сек)
     time.sleep(3.5)
+    
+    # 4. Пишемо результат і додаємо кнопку "Кинути ще раз"
     result = dice_msg.dice.value
-    bot.send_message(message.chat.id, f"🎯 {name}, випало: {result}", reply_markup=inline)
+    bot.send_message(
+        call.message.chat.id, 
+        f"🎯 {user_name}, випало: {result}", 
+        reply_markup=get_inline_keyboard()
+    )
 
 if __name__ == "__main__":
     Thread(target=run_web_server).start()
