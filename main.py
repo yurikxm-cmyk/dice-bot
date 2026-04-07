@@ -17,8 +17,9 @@ app = Flask('')
 
 # Сховища станів
 admin_states = {}
-banned_users = set() # Можна розширити до БД, але поки в пам'яті
+banned_users = set()
 
+# --- ФУНКЦІЯ АВТОВИДАЛЕННЯ ---
 def delete_after(chat_id, message_id, delay=120):
     def delayed_delete():
         time.sleep(delay)
@@ -26,9 +27,9 @@ def delete_after(chat_id, message_id, delay=120):
         except: pass
     threading.Thread(target=delayed_delete).start()
 
-# --- РОБОТА З БД ---
+# --- РОБОТА З БАЗОЮ ДАНИХ ---
 def update_data(user, chat, is_six=False):
-    if user.id in banned_users: return # Ігноруємо забанених
+    if user.id in banned_users: return
     try:
         conn = psycopg2.connect(dsn=DATABASE_URL)
         cur = conn.cursor()
@@ -57,78 +58,93 @@ def get_admin_inline_menu():
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
         types.InlineKeyboardButton("🌐 Глобальна статистика", callback_data="adm_stats"),
+        types.InlineKeyboardButton("🏘 Список всіх груп", callback_data="adm_groups"),
+        types.InlineKeyboardButton("📢 Розсилка у всі чати", callback_data="adm_bc"),
         types.InlineKeyboardButton("🎁 Роздати +5 шісток усім", callback_data="adm_gift"),
         types.InlineKeyboardButton("🚫 Забанити гравця (ID)", callback_data="adm_ban"),
-        types.InlineKeyboardButton("🏘 Список груп", callback_data="adm_groups"),
-        types.InlineKeyboardButton("📢 Розсилка", callback_data="adm_bc"),
-        types.InlineKeyboardButton("ℹ️ Інфо про цей чат", callback_data="adm_chat_info"),
         types.InlineKeyboardButton("♻️ Скинути місяць", callback_data="adm_reset")
     )
     return markup
 
-# --- ОБРОБНИКИ АДМІН-КНОПОК ---
+# --- 1. ПРІОРИТЕТНА КОМАНДА START ---
+@bot.message_handler(commands=['start'])
+def start_cmd(message):
+    update_data(message.from_user, message.chat)
+    bot.send_message(
+        message.chat.id, 
+        "🎰 Бот готовий! Використовуй кнопки нижче для гри:", 
+        reply_markup=get_main_keyboard(message.from_user.id)
+    )
+
+# --- 2. ОБРОБНИК CALLBACK (АДМІН-МЕНЮ) ---
 @bot.callback_query_handler(func=lambda call: True)
 def admin_calls(call):
     if call.from_user.id != ADMIN_ID: return
-    
-    conn = psycopg2.connect(dsn=DATABASE_URL)
-    cur = conn.cursor()
+    try:
+        conn = psycopg2.connect(dsn=DATABASE_URL)
+        cur = conn.cursor()
 
-    if call.data == "adm_stats":
-        cur.execute("SELECT COUNT(DISTINCT user_id), SUM(sixes_count) FROM group_stats")
-        u, s = cur.fetchone()
-        bot.send_message(call.message.chat.id, f"🌐 **Глобально:**\n👤 Юзерів: `{u}`\n🔥 Шісток: `{s}`", parse_mode="Markdown")
+        if call.data == "adm_stats":
+            cur.execute("SELECT COUNT(DISTINCT user_id), SUM(sixes_count) FROM group_stats")
+            u, s = cur.fetchone()
+            bot.send_message(call.message.chat.id, f"🌐 **ГЛОБАЛЬНО:**\n👤 Гравців: `{u}`\n🔥 Шісток: `{s}`", parse_mode="Markdown")
 
-    elif call.data == "adm_gift":
-        cur.execute("UPDATE group_stats SET sixes_count = sixes_count + 5")
-        conn.commit()
-        bot.answer_callback_query(call.id, "🎁 Подаровано +5 шісток усім гравцям!", show_alert=True)
+        elif call.data == "adm_groups":
+            cur.execute("SELECT chat_name, COUNT(user_id) FROM group_stats GROUP BY chat_name")
+            groups = cur.fetchall()
+            text = "🏘 **ГРУПИ ТА АКТИВНІСТЬ:**\n\n" + "\n".join([f"• {g[0]} — `{g[1]}` гравців" for g in groups])
+            bot.send_message(call.message.chat.id, text)
 
-    elif call.data == "adm_ban":
-        admin_states[call.from_user.id] = "waiting_for_ban_id"
-        bot.send_message(call.message.chat.id, "🚫 Введіть ID користувача для бану:")
+        elif call.data == "adm_gift":
+            cur.execute("UPDATE group_stats SET sixes_count = sixes_count + 5")
+            conn.commit()
+            bot.answer_callback_query(call.id, "🎁 +5 шісток нараховано кожному!", show_alert=True)
 
-    elif call.data == "adm_chat_info":
-        info = f"📍 **Чат:** {call.message.chat.title}\n🆔 **ID:** `{call.message.chat.id}`"
-        bot.send_message(call.message.chat.id, info, parse_mode="Markdown")
+        elif call.data == "adm_bc":
+            admin_states[call.from_user.id] = "waiting_bc"
+            bot.send_message(call.message.chat.id, "📢 Введіть текст для розсилки:")
 
-    elif call.data == "adm_bc":
-        admin_states[call.from_user.id] = "waiting_bc"
-        bot.send_message(call.message.chat.id, "📢 Введіть текст розсилки:")
+        elif call.data == "adm_ban":
+            admin_states[call.from_user.id] = "waiting_ban"
+            bot.send_message(call.message.chat.id, "🚫 Введіть ID гравця для бану:")
 
-    elif call.data == "adm_reset":
-        cur.execute("UPDATE group_stats SET sixes_count = 0")
-        conn.commit()
-        bot.edit_message_text("✅ Статистику оновлено на новий місяць.", call.message.chat.id, call.message.message_id)
+        elif call.data == "adm_reset":
+            cur.execute("UPDATE group_stats SET sixes_count = 0")
+            conn.commit()
+            bot.edit_message_text("✅ Статистику місяця скинуто.", call.message.chat.id, call.message.message_id)
 
-    cur.close(); conn.close()
+        cur.close(); conn.close()
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"❌ Помилка БД: {e}")
 
-# --- ГОЛОВНИЙ ОБРОБНИК ---
+# --- 3. ОБРОБНИК ТЕКСТУ ТА КНОПОК ---
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
-    uid = message.from_user.id
-    cid = message.chat.id
+    uid, cid, text = message.from_user.id, message.chat.id, message.text
     if uid in banned_users: return
 
-    # Логіка станів адміна
+    # Логіка очікування тексту від адміна
     if uid == ADMIN_ID and uid in admin_states:
-        state = admin_states[uid]
-        del admin_states[uid]
-        
-        if state == "waiting_for_ban_id":
+        state = admin_states.pop(uid)
+        if state == "waiting_bc":
             try:
-                target = int(message.text)
-                banned_users.add(target)
-                bot.send_message(cid, f"✅ Користувача `{target}` забанено.")
-            except: bot.send_message(cid, "❌ Невірний ID.")
-        
-        elif state == "waiting_bc":
-            # Тут логіка розсилки, яку ми писали раніше
-            bot.send_message(cid, "🚀 Розсилку запущено...")
+                conn = psycopg2.connect(dsn=DATABASE_URL); cur = conn.cursor()
+                cur.execute("SELECT DISTINCT chat_id FROM group_stats"); chats = cur.fetchall()
+                cur.close(); conn.close()
+                for c in chats:
+                    try: bot.send_message(c[0], f"📢 **ОГОЛОШЕННЯ:**\n\n{text}", parse_mode="Markdown")
+                    except: pass
+                bot.send_message(cid, "✅ Розсилку завершено.")
+            except: bot.send_message(cid, "❌ Помилка бази при розсилці.")
+        elif state == "waiting_ban":
+            try: 
+                banned_users.add(int(text))
+                bot.send_message(cid, f"✅ Юзер `{text}` забанений (до перезапуску).")
+            except: bot.send_message(cid, "❌ Помилка: введіть лише цифри ID.")
         return
 
-    # Кнопки меню
-    if message.text == "🎲 Кинути кубик":
+    # Кнопки гравців
+    if text == "🎲 Кинути кубик":
         delete_after(cid, message.message_id)
         d = bot.send_dice(cid)
         delete_after(cid, d.message_id)
@@ -137,19 +153,30 @@ def handle_all(message):
         res = bot.send_message(cid, f"🎯 {message.from_user.first_name}, випало: {d.dice.value}!")
         delete_after(cid, res.message_id)
 
-    elif "ТОП" in message.text:
+    elif "ТОП" in text:
         delete_after(cid, message.message_id)
-        # ... логіка ТОПу ...
-        pass
+        try:
+            conn = psycopg2.connect(dsn=DATABASE_URL); cur = conn.cursor()
+            cur.execute("SELECT username, sixes_count FROM group_stats WHERE chat_id = %s AND sixes_count > 0 ORDER BY sixes_count DESC LIMIT 10", (cid,))
+            rows = cur.fetchall(); cur.close(); conn.close()
+            if not rows: bot.send_message(cid, "🏆 Поки порожньо.")
+            else:
+                out = "🏆 **ТОП ГРУПИ:**\n\n" + "\n".join([f"{i+1}. {r[0]} — 🔥 `{r[1]}`" for i, r in enumerate(rows)])
+                bot.send_message(cid, out, parse_mode="Markdown")
+        except: bot.send_message(cid, "❌ Помилка при отриманні ТОПу.")
 
-    elif "АДМІН-МЕНЮ" in message.text and uid == ADMIN_ID:
-        bot.send_message(cid, "🛠 **Панель керування:**", reply_markup=get_admin_inline_menu(), parse_mode="Markdown")
+    elif "Статистика" in text:
+        delete_after(cid, message.message_id)
+        try:
+            conn = psycopg2.connect(dsn=DATABASE_URL); cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM group_stats WHERE chat_id = %s", (cid,))
+            total = cur.fetchone()[0]
+            bot.send_message(cid, f"📊 У цій групі: `{total}` гравців.", parse_mode="Markdown")
+            cur.close(); conn.close()
+        except: pass
 
-# Лог додавання в нову групу
-@bot.my_chat_member_handler()
-def on_join(message):
-    if message.new_chat_member.status == "member":
-        bot.send_message(ADMIN_ID, f"🆕 **Бота додано в групу:**\n🏘 {message.chat.title}\n🆔 `{message.chat.id}`")
+    elif text == "⚙️ АДМІН-МЕНЮ" and uid == ADMIN_ID:
+        bot.send_message(cid, "🛠 **Адмін-центр керування:**", reply_markup=get_admin_inline_menu(), parse_mode="Markdown")
 
 @app.route('/')
 def home(): return "OK"
