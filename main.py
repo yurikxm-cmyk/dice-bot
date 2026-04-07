@@ -9,7 +9,7 @@ from threading import Thread
 
 TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
-ADMIN_ID = 8765742454 
+ADMIN_ID = 8309122402
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask('')
