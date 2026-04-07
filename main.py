@@ -88,14 +88,38 @@ def delete_after(chat_id, message_id, delay=60):
         except: pass
     threading.Thread(target=delayed_delete, daemon=True).start()
 
-# --- 4. ЛОГІКА ЗАПИСУ ---
+# --- 4. ЛОГІКА СКИНУТИ СТАТИСТИКУ ---
+def reset_all_stats():
+    conn = None
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        cur.execute("""
+            UPDATE group_stats 
+            SET xp = 0, count_1 = 0, count_2 = 0, count_3 = 0, 
+                count_4 = 0, count_5 = 0, count_6 = 0
+        """)
+        conn.commit(); cur.close()
+        return True
+    except: return False
+    finally:
+        if conn: release_db_connection(conn)
+
+def check_new_month():
+    while True:
+        now = datetime.now()
+        if now.day == 1 and now.hour == 0 and now.minute == 0:
+            reset_all_stats()
+            print("📅 Статистику скинуто (новий місяць)")
+            time.sleep(61)
+        time.sleep(30)
+
+# --- 5. ЛОГІКА ЗАПИСУ ---
 def update_data(user, chat, dice_value):
     conn = None
     try:
         conn = get_db_connection(); cur = conn.cursor()
         u_name = user.username if user.username else user.first_name
         c_name = chat.title if chat.title else "Особисті"
-        
         xp_gain = 15 if dice_value == 6 else (5 if dice_value > 0 else 0)
         col_name = f"count_{dice_value}" if dice_value > 0 else "count_1"
 
@@ -106,40 +130,26 @@ def update_data(user, chat, dice_value):
                 ON CONFLICT (user_id, chat_id) DO UPDATE SET 
                     {col_name} = group_stats.{col_name} + 1,
                     xp = group_stats.xp + EXCLUDED.xp,
-                    username = EXCLUDED.username,
-                    chat_name = EXCLUDED.chat_name,
-                    last_roll = CURRENT_TIMESTAMP;
+                    username = EXCLUDED.username, chat_name = EXCLUDED.chat_name, last_roll = CURRENT_TIMESTAMP;
             """, (user.id, chat.id, c_name, u_name, xp_gain))
         else:
-            cur.execute("""
-                INSERT INTO group_stats (user_id, chat_id, chat_name, username)
-                VALUES (%s, %s, %s, %s) ON CONFLICT (user_id, chat_id) DO NOTHING;
-            """, (user.id, chat.id, c_name, u_name))
-            
+            cur.execute("INSERT INTO group_stats (user_id, chat_id, chat_name, username) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING;", (user.id, chat.id, c_name, u_name))
         conn.commit(); cur.close()
     except Exception as e: print(f"DB Error: {e}")
     finally:
         if conn: release_db_connection(conn)
 
 def get_main_keyboard(user_id):
-    # Додано one_time_keyboard=False щоб кнопки не зникали
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2, one_time_keyboard=False)
     markup.add("🎲 Кинути кубик", "🎁 Бонус", "🏆 ТОП", "📊 Статистика")
-    if int(user_id) == ADMIN_ID:
-        markup.add("⚙️ АДМІН-МЕНЮ")
+    if int(user_id) == ADMIN_ID: markup.add("⚙️ АДМІН-МЕНЮ")
     return markup
 
 # --- ОБРОБНИКИ ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     update_data(message.from_user, message.chat, 0)
-    # ПРИБРАНО автовидалення цього повідомлення, щоб кнопки трималися
-    bot.send_message(
-        message.chat.id, 
-        "🎰 Панель гравця активована! Кнопки нижче 👇", 
-        reply_markup=get_main_keyboard(message.from_user.id)
-    )
-    # Видаляємо тільки /start від користувача
+    bot.send_message(message.chat.id, "🎰 Панель активована! Кнопки нижче 👇", reply_markup=get_main_keyboard(message.from_user.id))
     try: bot.delete_message(message.chat.id, message.message_id)
     except: pass
 
@@ -157,6 +167,10 @@ def admin_calls(call):
     elif call.data == "adm_give_xp":
         admin_states[call.from_user.id] = "waiting_xp"
         bot.send_message(call.message.chat.id, "🎁 Формат: `ID XP`")
+    elif call.data == "adm_reset":
+        if reset_all_stats():
+            bot.answer_callback_query(call.id, "✅ Статистику місяця скинуто!", show_alert=True)
+            bot.send_message(call.message.chat.id, "🔄 Адмін вручну скинув статистику всіх гравців.")
     cur.close(); release_db_connection(conn)
 
 @bot.message_handler(func=lambda m: True)
@@ -168,7 +182,8 @@ def handle_all(message):
             markup = types.InlineKeyboardMarkup()
             markup.add(types.InlineKeyboardButton("📊 Статистика", callback_data="adm_stats"),
                        types.InlineKeyboardButton("📢 Розсилка", callback_data="adm_bc"),
-                       types.InlineKeyboardButton("🎁 Дати XP", callback_data="adm_give_xp"))
+                       types.InlineKeyboardButton("🎁 Дати XP", callback_data="adm_give_xp"),
+                       types.InlineKeyboardButton("🔄 Скинути місяць", callback_data="adm_reset"))
             bot.send_message(cid, "🛠 Адмін-панель:", reply_markup=markup)
         else:
             try: bot.delete_message(cid, message.message_id)
@@ -183,16 +198,14 @@ def handle_all(message):
         res = cur.fetchone()
         if res and res[0] and (datetime.now() - res[0]) < timedelta(hours=24):
             rem = timedelta(hours=24) - (datetime.now() - res[0])
-            msg = bot.send_message(cid, f"⏳ {message.from_user.first_name}, зачекай ще {rem.seconds // 3600} год. {(rem.seconds // 60) % 60} хв.")
+            msg = bot.send_message(cid, f"⏳ {message.from_user.first_name}, бонус через {rem.seconds // 3600} год.")
         else:
             import random
             bonus_xp = random.randint(20, 100)
             cur.execute("UPDATE group_stats SET xp = xp + %s, last_bonus = CURRENT_TIMESTAMP WHERE user_id = %s AND chat_id = %s", (bonus_xp, uid, cid))
             conn.commit()
-            msg = bot.send_message(cid, f"🎁 {message.from_user.first_name}, бонус: +{bonus_xp} XP!")
-        cur.close(); release_db_connection(conn)
-        delete_after(cid, msg.message_id, 30)
-        return
+            msg = bot.send_message(cid, f"🎁 {message.from_user.first_name}, +{bonus_xp} XP!")
+        cur.close(); release_db_connection(conn); delete_after(cid, msg.message_id, 30); return
 
     if text == "🎲 Кинути кубик":
         try: bot.delete_message(cid, message.message_id)
@@ -201,9 +214,7 @@ def handle_all(message):
         update_data(message.from_user, message.chat, d.dice.value)
         time.sleep(3.5)
         msg = bot.send_message(cid, f"🎯 {message.from_user.first_name}, випало {d.dice.value}!")
-        delete_after(cid, d.message_id, 60)
-        delete_after(cid, msg.message_id, 60)
-        return
+        delete_after(cid, d.message_id, 60); delete_after(cid, msg.message_id, 60); return
 
     if "Статистика" in text:
         try: bot.delete_message(cid, message.message_id)
@@ -213,17 +224,10 @@ def handle_all(message):
         res = cur.fetchone()
         if res:
             xp, c1, c2, c3, c4, c5, c6 = res
-            stats_msg = (
-                f"👤 {message.from_user.first_name}\n"
-                f"🎖 {get_rank(xp)}\n⭐ XP: {xp}\n\n"
-                f"📊 **Твоя удача:**\n"
-                f"1️⃣ — {c1} | 2️⃣ — {c2} | 3️⃣ — {c3}\n"
-                f"4️⃣ — {c4} | 5️⃣ — {c5} | 6️⃣ — {c6}"
-            )
-            msg = bot.send_message(cid, stats_msg, parse_mode="Markdown")
+            stats = f"👤 {message.from_user.first_name}\n🎖 {get_rank(xp)}\n⭐ XP: {xp}\n\n📊 **Удача:**\n1️⃣-{c1} | 2️⃣-{c2} | 3️⃣-{c3}\n4️⃣-{c4} | 5️⃣-{c5} | 6️⃣-{c6}"
+            msg = bot.send_message(cid, stats, parse_mode="Markdown")
             delete_after(cid, msg.message_id, 60)
-        cur.close(); release_db_connection(conn)
-        return
+        cur.close(); release_db_connection(conn); return
 
     if text == "🏆 ТОП":
         try: bot.delete_message(cid, message.message_id)
@@ -237,9 +241,10 @@ def handle_all(message):
                 leaderboard += f"{i}. {row[0] if row[0] else 'Гравець'} — {row[1]} XP\n"
             msg = bot.send_message(cid, leaderboard, parse_mode="Markdown")
             delete_after(cid, msg.message_id, 60)
-        cur.close(); release_db_connection(conn)
-        return
+        cur.close(); release_db_connection(conn); return
 
+# --- ЗАПУСК ---
 if __name__ == "__main__":
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
+    Thread(target=check_new_month, daemon=True).start()
     bot.infinity_polling()
