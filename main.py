@@ -7,9 +7,10 @@ from telebot import types
 from flask import Flask
 from threading import Thread
 
+# Налаштування
 TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
-ADMIN_ID = 8309122402
+ADMIN_ID = 8765742454  # Переконайся, що цей ID твій!
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask('')
@@ -20,26 +21,6 @@ def delete_after(chat_id, message_id, delay=120):
         try: bot.delete_message(chat_id, message_id)
         except: pass
     threading.Thread(target=delayed_delete).start()
-
-# --- ПРАВИЛЬНЕ СТВОРЕННЯ ТАБЛИЦІ ---
-def init_db():
-    try:
-        conn = psycopg2.connect(dsn=DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS group_stats (
-                user_id BIGINT,
-                chat_id BIGINT,
-                chat_name TEXT,
-                username TEXT,
-                sixes_count INTEGER DEFAULT 0,
-                last_roll TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (user_id, chat_id)
-            );
-        """)
-        conn.commit()
-        cur.close(); conn.close()
-    except Exception as e: print(f"Init DB Error: {e}")
 
 def update_data(user, chat, is_six=False):
     try:
@@ -56,11 +37,43 @@ def update_data(user, chat, is_six=False):
         """, (user.id, chat.id, c_name, u_name, 1 if is_six else 0))
         conn.commit()
         cur.close(); conn.close()
-    except Exception as e: print(f"Update Error: {e}")
+    except Exception as e: print(f"DB Error: {e}")
 
-# --- ОБРОБКА КОМАНД ---
+# --- 1. КОМАНДА START (Пріоритет №1) ---
+@bot.message_handler(commands=['start'])
+def start_cmd(message):
+    update_data(message.from_user, message.chat)
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add("🎲 Кинути кубик", "🏆 ТОП цієї групи", "📊 Статистика групи")
+    
+    bot.send_message(message.chat.id, "🎰 Бот готовий! Грай кнопками знизу:", reply_markup=markup)
+    
+    # ПЕРЕВІРКА НА АДМІНА (виводимо окремим повідомленням)
+    if message.from_user.id == ADMIN_ID:
+        admin_markup = types.InlineKeyboardMarkup()
+        admin_markup.add(types.InlineKeyboardButton("♻️ Скинути статистику (Місяць)", callback_data="reset_month_confirm"))
+        bot.send_message(message.chat.id, f"⚙️ **АДМІН-ПАНЕЛЬ АКТИВНА**\nТвій ID: `{message.from_user.id}`", reply_markup=admin_markup, parse_mode="Markdown")
+
+# --- 2. ОБРОБКА КНОПОК АДМІНА ---
+@bot.callback_query_handler(func=lambda call: call.data == "reset_month_confirm")
+def admin_callback(call):
+    if call.from_user.id == ADMIN_ID:
+        try:
+            conn = psycopg2.connect(dsn=DATABASE_URL)
+            cur = conn.cursor()
+            cur.execute("UPDATE group_stats SET sixes_count = 0;")
+            conn.commit()
+            cur.close(); conn.close()
+            bot.answer_callback_query(call.id, "Статистику обнулено!", show_alert=True)
+            bot.edit_message_text("✅ Статистику всіх груп успішно скинуто на новий місяць.", call.message.chat.id, call.message.message_id)
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Помилка: {e}")
+    else:
+        bot.answer_callback_query(call.id, "У вас немає прав!", show_alert=True)
+
+# --- 3. ЗАГАЛЬНИЙ ОБРОБНИК ТЕКСТУ ---
 @bot.message_handler(func=lambda m: True)
-def handle_all(message):
+def handle_text(message):
     chat_id = message.chat.id
     text = message.text if message.text else ""
 
@@ -78,13 +91,11 @@ def handle_all(message):
         try:
             conn = psycopg2.connect(dsn=DATABASE_URL)
             cur = conn.cursor()
-            # ТУТ ВИПРАВЛЕНО НАЗВУ: group_stats замість groupstats
             cur.execute("SELECT username, sixes_count FROM group_stats WHERE chat_id = %s AND sixes_count > 0 ORDER BY sixes_count DESC LIMIT 10", (chat_id,))
             rows = cur.fetchall()
             cur.close(); conn.close()
-            
             if not rows:
-                bot.send_message(chat_id, "🏆 **ТОП ГРУПИ:**\n\nПоки що ніхто не вибив 6! 🎲")
+                bot.send_message(chat_id, "🏆 **ТОП ГРУПИ:**\n\nПоки порожньо.")
             else:
                 res_text = "🏆 **ТОП ГРУПИ (шістки):**\n\n"
                 for i, r in enumerate(rows):
@@ -103,16 +114,9 @@ def handle_all(message):
             bot.send_message(chat_id, f"📊 **У цій групі:** `{total}` гравців.", parse_mode="Markdown")
         except: pass
 
-@bot.message_handler(commands=['start'])
-def start_cmd(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🎲 Кинути кубик", "🏆 ТОП цієї групи", "📊 Статистика групи")
-    bot.send_message(message.chat.id, "🎰 Бот готовий!", reply_markup=markup)
-
 @app.route('/')
 def home(): return "OK"
 
 if __name__ == "__main__":
-    init_db() # Створюємо таблицю при запуску
     Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))).start()
     bot.infinity_polling()
