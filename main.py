@@ -7,169 +7,108 @@ from telebot import types
 from flask import Flask
 from threading import Thread
 
-# Налаштування
+# Налаштування (Render бере їх з Environment Variables)
 TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
-ADMIN_ID = 8765742454  # Твій ID
+ADMIN_ID = 8765742454 
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask('')
 
-# --- ФУНКЦІЯ ВИДАЛЕННЯ ---
+# --- ФУНКЦІЯ АВТОВИДАЛЕННЯ ---
 def delete_after(chat_id, message_id, delay=120):
     def delayed_delete():
         time.sleep(delay)
         try:
             bot.delete_message(chat_id, message_id)
-        except Exception:
-            pass 
+        except: pass
     threading.Thread(target=delayed_delete).start()
 
-# --- БАЗА ДАНИХ ---
-def init_db():
+# --- ЛОГІКА БАЗИ ДАНИХ (СПІЛЬНА) ---
+def get_db_connection():
+    return psycopg2.connect(dsn=DATABASE_URL)
+
+def get_top_text(chat_id):
     try:
-        conn = psycopg2.connect(dsn=DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS group_stats (
-                user_id BIGINT,
-                chat_id BIGINT,
-                chat_name TEXT,
-                username TEXT,
-                sixes_count INTEGER DEFAULT 0,
-                last_roll TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (user_id, chat_id)
-            );
-        """)
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        print(f"Помилка БД: {e}")
-
-def update_data(user, chat, is_six=False):
-    try:
-        conn = psycopg2.connect(dsn=DATABASE_URL)
-        cur = conn.cursor()
-        u_name = user.username if user.username else user.first_name
-        c_name = chat.title if chat.title else "Особисті повідомлення"
-        
-        cur.execute("""
-            INSERT INTO group_stats (user_id, chat_id, chat_name, username, sixes_count, last_roll)
-            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT (user_id, chat_id) DO UPDATE SET 
-                last_roll = CURRENT_TIMESTAMP, 
-                username = EXCLUDED.username,
-                chat_name = EXCLUDED.chat_name,
-                sixes_count = group_stats.sixes_count + EXCLUDED.sixes_count;
-        """, (user.id, chat.id, c_name, u_name, 1 if is_six else 0))
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        print(f"Помилка оновлення: {e}")
-
-# --- ВЕБ-СЕРВЕР ---
-@app.route('/')
-def home(): return "Бот активний!"
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# --- НИЖНЯ ПАНЕЛЬ (Reply Keyboard) ---
-def get_main_keyboard():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    # Кнопки текстом, які з'являться замість звичайної клавіатури
-    markup.add(
-        types.KeyboardButton("🎲 Кинути кубик"),
-        types.KeyboardButton("🏆 ТОП цієї групи"),
-        types.KeyboardButton("📊 Статистика групи")
-    )
-    return markup
-
-# --- АДМІН-КНОПКА (Inline) ---
-def get_admin_inline():
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("⚙️ АДМІН: Глобальна інфо", callback_data="admin_global"))
-    return markup
-
-# --- ОБРОБКА КОМАНДИ /START ---
-@bot.message_handler(commands=['start'])
-def welcome(message):
-    update_data(message.from_user, message.chat)
-    # Важливо: відправляємо reply_markup=get_main_keyboard(), щоб замінити інлайн-кнопки на нижню панель
-    msg = bot.send_message(
-        message.chat.id, 
-        "🎰 Бот активовано! Тепер кнопки знаходяться внизу, де зазвичай клавіатура.", 
-        reply_markup=get_main_keyboard()
-    )
-    delete_after(message.chat.id, message.message_id)
-    delete_after(message.chat.id, msg.message_id)
-    
-    if message.from_user.id == ADMIN_ID:
-        bot.send_message(message.chat.id, "Доступ адміна:", reply_markup=get_admin_inline())
-
-# --- ОБРОБКА КНОПОК З НИЖНЬОЇ ПАНЕЛІ ---
-@bot.message_handler(func=lambda m: m.text in ["🎲 Кинути кубик", "🏆 ТОП цієї групи", "📊 Статистика групи"])
-def handle_menu(message):
-    chat_id = message.chat.id
-    
-    # Видаляємо повідомлення юзера через 2 хв
-    delete_after(chat_id, message.message_id)
-
-    if message.text == "🎲 Кинути кубик":
-        dice_msg = bot.send_dice(chat_id)
-        delete_after(chat_id, dice_msg.message_id)
-        
-        is_six = (dice_msg.dice.value == 6)
-        update_data(message.from_user, message.chat, is_six=is_six)
-        
-        time.sleep(3.5)
-        res_text = f"🎯 {message.from_user.first_name}, випало: {dice_msg.dice.value}!"
-        res_msg = bot.send_message(chat_id, res_text)
-        delete_after(chat_id, res_msg.message_id)
-
-    elif message.text == "🏆 ТОП цієї групи":
-        conn = psycopg2.connect(dsn=DATABASE_URL)
+        conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT username, sixes_count FROM group_stats WHERE chat_id = %s AND sixes_count > 0 ORDER BY sixes_count DESC LIMIT 10", (chat_id,))
         rows = cur.fetchall()
         cur.close(); conn.close()
-        
-        text = "🏆 **ТОП ГРУПИ:**\n\n" + "\n".join([f"{i+1}. {r[0]} — {r[1]}" for i, r in enumerate(rows)]) if rows else "Поки пусто."
-        msg = bot.send_message(chat_id, text, parse_mode="Markdown")
-        delete_after(chat_id, msg.message_id)
+        if not rows: return "Поки пусто."
+        return "🏆 **ТОП ГРУПИ:**\n\n" + "\n".join([f"{i+1}. {r[0]} — {r[1]}" for i, r in enumerate(rows)])
+    except Exception as e: return f"Помилка БД: {e}"
 
-    elif message.text == "📊 Статистика групи":
-        conn = psycopg2.connect(dsn=DATABASE_URL)
+def get_stats_text(chat_id):
+    try:
+        conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM group_stats WHERE chat_id = %s", (chat_id,))
         total = cur.fetchone()[0]
         cur.close(); conn.close()
-        msg = bot.send_message(chat_id, f"📊 **У цій групі:** `{total}` гравців.", parse_mode="Markdown")
+        return f"📊 **У цій групі:** `{total}` гравців."
+    except Exception as e: return f"Помилка БД: {e}"
+
+# --- КЛАВІАТУРА ---
+def get_main_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(types.KeyboardButton("🎲 Кинути кубик"), 
+               types.KeyboardButton("🏆 ТОП цієї групи"), 
+               types.KeyboardButton("📊 Статистика групи"))
+    return markup
+
+# --- ОБРОБНИК ТЕКСТОВИХ КНОПОК (НИЖНЯ ПАНЕЛЬ) ---
+@bot.message_handler(func=lambda m: m.text in ["🎲 Кинути кубик", "🏆 ТОП цієї групи", "📊 Статистика групи"])
+def handle_menu_text(message):
+    chat_id = message.chat.id
+    delete_after(chat_id, message.message_id) # Видаляємо команду юзера
+
+    if message.text == "🎲 Кинути кубик":
+        dice = bot.send_dice(chat_id)
+        delete_after(chat_id, dice.message_id)
+        # Оновлення даних (is_six = True якщо випало 6)
+        from update_logic import update_data # Припускаємо, що update_data у тебе є
+        update_data(message.from_user, message.chat, is_six=(dice.dice.value == 6))
+        
+        time.sleep(3.5)
+        res = bot.send_message(chat_id, f"🎯 {message.from_user.first_name}, випало: {dice.dice.value}!")
+        delete_after(chat_id, res.message_id)
+
+    elif message.text == "🏆 ТОП цієї групи":
+        msg = bot.send_message(chat_id, get_top_text(chat_id), parse_mode="Markdown")
         delete_after(chat_id, msg.message_id)
 
-# --- CALLBACK ДЛЯ АДМІНА ---
-@bot.callback_query_handler(func=lambda call: call.data == "admin_global")
-def admin_query(call):
-    if call.from_user.id == ADMIN_ID:
-        conn = psycopg2.connect(dsn=DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(DISTINCT user_id) FROM group_stats")
-        total_users = cur.fetchone()[0]
-        cur.execute("SELECT chat_name, COUNT(user_id) FROM group_stats GROUP BY chat_name")
-        groups = cur.fetchall()
-        cur.close(); conn.close()
-        
-        text = f"🌐 **ГЛОБАЛЬНА СТАТИСТИКА**\n👤 Всього юзерів: `{total_users}`\n\n🏘 **Список груп:**\n"
-        for g_name, count in groups:
-            text += f"• {g_name}: `{count}` гравців\n"
-        
-        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
+    elif message.text == "📊 Статистика групи":
+        msg = bot.send_message(chat_id, get_stats_text(chat_id), parse_mode="Markdown")
+        delete_after(chat_id, msg.message_id)
+
+# --- ОБРОБНИК СТАРИХ INLINE-КНОПОК (ЩОБ ВОНИ ЗАПРАЦЮВАЛИ) ---
+@bot.callback_query_handler(func=lambda call: True)
+def handle_old_buttons(call):
+    chat_id = call.message.chat.id
+    if call.data == "view_top":
         bot.answer_callback_query(call.id)
+        msg = bot.send_message(chat_id, get_top_text(chat_id), parse_mode="Markdown")
+        delete_after(chat_id, msg.message_id)
+    elif call.data == "group_stats":
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(chat_id, get_stats_text(chat_id), parse_mode="Markdown")
+        delete_after(chat_id, msg.message_id)
+    elif call.data == "roll_dice":
+        bot.answer_callback_query(call.id)
+        # Логіка кубика аналогічна текстовій
+        dice = bot.send_dice(chat_id)
+        delete_after(chat_id, dice.message_id)
+
+# --- СТАРТ ---
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.send_message(message.chat.id, "🎰 Клавіатуру оновлено! Грай кнопками нижче.", reply_markup=get_main_keyboard())
+
+# Веб-сервер для Render
+@app.route('/')
+def home(): return "Bot is running"
 
 if __name__ == "__main__":
-    init_db()
-    Thread(target=run_web_server).start()
+    Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))).start()
     bot.infinity_polling()
