@@ -7,7 +7,6 @@ from telebot import types
 from flask import Flask
 from threading import Thread
 
-# Налаштування
 TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
 ADMIN_ID = 8765742454 
@@ -18,12 +17,10 @@ app = Flask('')
 def delete_after(chat_id, message_id, delay=120):
     def delayed_delete():
         time.sleep(delay)
-        try:
-            bot.delete_message(chat_id, message_id)
+        try: bot.delete_message(chat_id, message_id)
         except: pass
     threading.Thread(target=delayed_delete).start()
 
-# --- ФУНКЦІЇ БД ---
 def update_data(user, chat, is_six=False):
     try:
         conn = psycopg2.connect(dsn=DATABASE_URL)
@@ -34,55 +31,20 @@ def update_data(user, chat, is_six=False):
             INSERT INTO group_stats (user_id, chat_id, chat_name, username, sixes_count, last_roll)
             VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             ON CONFLICT (user_id, chat_id) DO UPDATE SET 
-                last_roll = CURRENT_TIMESTAMP, 
-                username = EXCLUDED.username,
-                chat_name = EXCLUDED.chat_name,
-                sixes_count = group_stats.sixes_count + EXCLUDED.sixes_count;
+                last_roll = CURRENT_TIMESTAMP, username = EXCLUDED.username,
+                chat_name = EXCLUDED.chat_name, sixes_count = group_stats.sixes_count + EXCLUDED.sixes_count;
         """, (user.id, chat.id, c_name, u_name, 1 if is_six else 0))
         conn.commit()
         cur.close(); conn.close()
     except Exception as e: print(f"DB Error: {e}")
 
-def get_top_text(chat_id):
-    try:
-        conn = psycopg2.connect(dsn=DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("SELECT username, sixes_count FROM group_stats WHERE chat_id = %s AND sixes_count > 0 ORDER BY sixes_count DESC LIMIT 10", (chat_id,))
-        rows = cur.fetchall()
-        cur.close(); conn.close()
-        
-        if not rows:
-            return "🏆 **ТОП ГРУПИ:**\n\nПоки що ніхто не вибив 6! 🎲"
-        
-        text = "🏆 **ТОП ГРУПИ (шістки):**\n\n"
-        for i, row in enumerate(rows):
-            # row[0] - ім'я, row[1] - кількість
-            text += f"{i+1}. {row[0]} — 🔥 `{row[1]}`\n"
-        return text
-    except Exception as e: return f"❌ Помилка БД: {e}"
-
-# --- КЛАВІАТУРА ---
-def get_main_keyboard():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(
-        types.KeyboardButton("🎲 Кинути кубик"),
-        types.KeyboardButton("🏆 ТОП цієї групи"),
-        types.KeyboardButton("📊 Статистика групи")
-    )
-    return markup
-
-# --- ОБРОБНИКИ ---
-@bot.message_handler(commands=['start'])
-def start_cmd(message):
-    update_data(message.from_user, message.chat)
-    bot.send_message(message.chat.id, "🎰 Бот готовий! Грай кнопками знизу:", reply_markup=get_main_keyboard())
-
+# --- ГОЛОВНА ЛОГІКА ---
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
     chat_id = message.chat.id
-    # Використовуємо 'in', бо Telegram може додавати символи при цитуванні
     text = message.text if message.text else ""
 
+    # Перевірка через "in", щоб обійти цитування
     if "Кинути кубик" in text:
         delete_after(chat_id, message.message_id)
         dice = bot.send_dice(chat_id)
@@ -92,11 +54,25 @@ def handle_all(message):
         res = bot.send_message(chat_id, f"🎯 {message.from_user.first_name}, випало: {dice.dice.value}!")
         delete_after(chat_id, res.message_id)
 
-    elif "ТОП цієї групи" in text:
+    elif "ТОП" in text:
         delete_after(chat_id, message.message_id)
-        bot.send_message(chat_id, get_top_text(chat_id), parse_mode="Markdown")
+        try:
+            conn = psycopg2.connect(dsn=DATABASE_URL)
+            cur = conn.cursor()
+            cur.execute("SELECT username, sixes_count FROM group_stats WHERE chat_id = %s AND sixes_count > 0 ORDER BY sixes_count DESC LIMIT 10", (chat_id,))
+            rows = cur.fetchall()
+            cur.close(); conn.close()
+            
+            if not rows:
+                bot.send_message(chat_id, "🏆 **ТОП ГРУПИ:**\n\nПоки порожньо.")
+            else:
+                res_text = "🏆 **ТОП ГРУПИ (шістки):**\n\n"
+                for i, r in enumerate(rows):
+                    res_text += f"{i+1}. {r[0]} — 🔥 `{r[1]}`\n"
+                bot.send_message(chat_id, res_text, parse_mode="Markdown")
+        except Exception as e: bot.send_message(chat_id, f"Помилка БД: {e}")
 
-    elif "Статистика групи" in text:
+    elif "Статистика" in text:
         delete_after(chat_id, message.message_id)
         try:
             conn = psycopg2.connect(dsn=DATABASE_URL)
@@ -106,6 +82,12 @@ def handle_all(message):
             cur.close(); conn.close()
             bot.send_message(chat_id, f"📊 **У цій групі:** `{total}` гравців.", parse_mode="Markdown")
         except: pass
+
+@bot.message_handler(commands=['start'])
+def start_cmd(message):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("🎲 Кинути кубик", "🏆 ТОП цієї групи", "📊 Статистика групи")
+    bot.send_message(message.chat.id, "🎰 Бот оновлений!", reply_markup=markup)
 
 @app.route('/')
 def home(): return "OK"
