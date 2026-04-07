@@ -16,14 +16,12 @@ ADMIN_ID = 8309122402  # Твій ID
 bot = telebot.TeleBot(TOKEN)
 app = Flask('')
 
-# Проста сторінка для Render, щоб він бачив, що сервіс живий
 @app.route('/')
 def home():
-    return "Бот працює!"
+    return "Бот працює та онлайн!"
 
 # Сховища станів
 admin_states = {}
-banned_users = set()
 
 # --- 1. ПУЛ З'ЄДНАНЬ ТА БЕЗПЕЧНЕ ОНОВЛЕННЯ БД ---
 try:
@@ -31,7 +29,6 @@ try:
     conn = db_pool.getconn()
     cur = conn.cursor()
     
-    # Створюємо таблицю, якщо її не існує
     cur.execute("""
         CREATE TABLE IF NOT EXISTS group_stats (
             user_id BIGINT,
@@ -50,7 +47,6 @@ try:
         );
     """)
     
-    # Автоматичне додавання колонок (якщо їх немає), щоб не ламати БД
     columns = [
         ("count_1", "INTEGER DEFAULT 0"), ("count_2", "INTEGER DEFAULT 0"),
         ("count_3", "INTEGER DEFAULT 0"), ("count_4", "INTEGER DEFAULT 0"),
@@ -66,7 +62,7 @@ try:
 
     cur.close()
     db_pool.putconn(conn)
-    print("✅ База даних готова. Дані захищені від видалення.")
+    print("✅ База даних готова.")
 except Exception as e:
     print(f"❌ Помилка БД: {e}")
 
@@ -93,7 +89,6 @@ def delete_after(chat_id, message_id, delay=120):
 
 # --- 4. ЛОГІКА ЗАПИСУ ---
 def update_data(user, chat, dice_value):
-    if user.id in banned_users: return
     conn = None
     try:
         conn = get_db_connection(); cur = conn.cursor()
@@ -115,7 +110,6 @@ def update_data(user, chat, dice_value):
                     last_roll = CURRENT_TIMESTAMP;
             """, (user.id, chat.id, c_name, u_name, xp_gain))
         else:
-            # Просто ініціалізація юзера при /start
             cur.execute("""
                 INSERT INTO group_stats (user_id, chat_id, chat_name, username, last_roll)
                 VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
@@ -136,7 +130,7 @@ def run_broadcast(text, chat_ids):
             success += 1
             time.sleep(0.1)
         except: continue
-    try: bot.send_message(ADMIN_ID, f"✅ Розсилку завершено! Отримали: {success}")
+    try: bot.send_message(ADMIN_ID, f"✅ Розсилку завершено! Отримали: {success} чатів.")
     except: pass
 
 # --- КЛАВІАТУРИ ---
@@ -160,36 +154,69 @@ def start_cmd(message):
 @bot.callback_query_handler(func=lambda call: True)
 def admin_calls(call):
     if call.from_user.id != ADMIN_ID: return
+    
+    conn = get_db_connection(); cur = conn.cursor()
+    
     if call.data == "adm_bc":
         admin_states[call.from_user.id] = "waiting_bc"
         bot.send_message(call.message.chat.id, "📢 Введіть текст для розсилки:")
+        
+    elif call.data == "adm_stats":
+        cur.execute("SELECT COUNT(DISTINCT user_id), COUNT(DISTINCT chat_id), SUM(xp) FROM group_stats")
+        res = cur.fetchone()
+        bot.send_message(call.message.chat.id, f"📈 **Глобальна статистика:**\n\n👤 Гравців: `{res[0]}`\n👥 Груп: `{res[1]}`\n⭐ Всього XP: `{res[2]}`", parse_mode="Markdown")
+        
+    elif call.data == "adm_give_xp":
+        admin_states[call.from_user.id] = "waiting_xp_give"
+        bot.send_message(call.message.chat.id, "🎁 Формат: `ID_користувача кількість` (через пробіл):")
+
     elif call.data == "adm_reset":
-        conn = get_db_connection(); cur = conn.cursor()
         cur.execute("DELETE FROM group_stats")
-        conn.commit(); cur.close(); release_db_connection(conn)
+        conn.commit()
         bot.send_message(call.message.chat.id, "✅ Статистику очищено.")
+        
+    cur.close(); release_db_connection(conn)
 
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
     uid, cid, text = message.from_user.id, message.chat.id, message.text
     
+    # Виклик адмін-панелі
     if text == "⚙️ АДМІН-МЕНЮ" and uid == ADMIN_ID:
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(types.InlineKeyboardButton("📢 Розсилка", callback_data="adm_bc"),
-                   types.InlineKeyboardButton("♻️ Скинути все", callback_data="adm_reset"))
-        bot.send_message(cid, "🛠 Адмін-панель:", reply_markup=markup)
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("📢 Розсилка", callback_data="adm_bc"),
+            types.InlineKeyboardButton("📊 Статистика", callback_data="adm_stats"),
+            types.InlineKeyboardButton("🎁 Дати XP", callback_data="adm_give_xp"),
+            types.InlineKeyboardButton("♻️ Скинути все", callback_data="adm_reset")
+        )
+        bot.send_message(cid, "🛠 **Панель адміністратора:**", reply_markup=markup, parse_mode="Markdown")
         return
 
+    # Обробка введення для адміна
     if uid == ADMIN_ID and uid in admin_states:
         state = admin_states.pop(uid)
+        
         if state == "waiting_bc":
             conn = get_db_connection(); cur = conn.cursor()
-            cur.execute("SELECT DISTINCT chat_id FROM group_stats"); chats = cur.fetchall()
+            cur.execute("SELECT DISTINCT chat_id FROM group_stats"); chats = [c[0] for c in cur.fetchall()]
             cur.close(); release_db_connection(conn)
-            threading.Thread(target=run_broadcast, args=(text, [c[0] for c in chats]), daemon=True).start()
+            threading.Thread(target=run_broadcast, args=(text, chats), daemon=True).start()
             bot.send_message(cid, "🚀 Розсилка почалася...")
-        return
+            return
 
+        if state == "waiting_xp_give":
+            try:
+                t_id, amt = text.split()
+                conn = get_db_connection(); cur = conn.cursor()
+                cur.execute("UPDATE group_stats SET xp = xp + %s WHERE user_id = %s", (int(amt), int(t_id)))
+                conn.commit(); cur.close(); release_db_connection(conn)
+                bot.send_message(cid, f"✅ Видано {amt} XP користувачу `{t_id}`")
+            except:
+                bot.send_message(cid, "❌ Помилка формату. Треба: `ID XP`")
+            return
+
+    # Ігрові кнопки
     if text == "🎲 Кинути кубик":
         delete_after(cid, message.message_id, delay=0)
         d = bot.send_dice(cid)
@@ -206,6 +233,8 @@ def handle_all(message):
             c1, c2, c3, c4, c5, c6, xp = res
             msg = bot.send_message(cid, f"👤 **Профіль:** {message.from_user.first_name}\n🎖 Ранг: `{get_rank(xp)}`\n⭐ XP: `{xp}`\n\n📊 1️⃣:{c1} 2️⃣:{c2} 3️⃣:{c3} 4️⃣:{c4} 5️⃣:{c5} 6️⃣:{c6}", parse_mode="Markdown")
             delete_after(cid, msg.message_id, delay=60)
+        else:
+            bot.send_message(cid, "📊 Дані ще не зібрані. Кинь кубик!")
         cur.close(); release_db_connection(conn)
 
     elif "ТОП" in text:
@@ -226,4 +255,4 @@ if __name__ == "__main__":
 
     Thread(target=run_flask).start()
     print("🚀 Бот запущений!")
-    bot.infinity_polling()
+    bot.infinity_polling(timeout=10, long_polling_timeout=5)
