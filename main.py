@@ -11,7 +11,7 @@ from threading import Thread
 # --- НАЛАШТУВАННЯ ---
 TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
-ADMIN_ID = 8309122402
+ADMIN_ID = 8309122402  # Твій ID
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask('')
@@ -34,14 +34,14 @@ def get_db_connection():
 def release_db_connection(conn):
     db_pool.putconn(conn)
 
-# --- 2. ПОКРАЩЕНЕ АВТОВИДАЛЕННЯ ---
+# --- 2. ПОКРАЩЕНЕ АВТОВИДАЛЕННЯ (120 сек) ---
 def delete_after(chat_id, message_id, delay=120):
     def delayed_delete():
         try:
             time.sleep(delay)
             bot.delete_message(chat_id, message_id)
         except:
-            pass # Ігноруємо, якщо повідомлення вже видалене або немає прав
+            pass
     threading.Thread(target=delayed_delete, daemon=True).start()
 
 # --- РОБОТА З БД ---
@@ -63,8 +63,7 @@ def update_data(user, chat, is_six=False):
         """, (user.id, chat.id, c_name, u_name, 1 if is_six else 0))
         conn.commit()
         cur.close()
-    except Exception as e:
-        print(f"DB Error: {e}")
+    except Exception as e: print(f"DB Error: {e}")
     finally:
         if conn: release_db_connection(conn)
 
@@ -76,17 +75,19 @@ def run_broadcast(text, chat_ids):
             bot.send_message(cid[0], f"📢 **ОГОЛОШЕННЯ:**\n\n{text}", parse_mode="Markdown")
             success += 1
             time.sleep(0.05)
-        except:
-            continue
-    try: bot.send_message(ADMIN_ID, f"✅ Розсилку завершено! Доставлено: {success}")
+        except: continue
+    try: bot.send_message(ADMIN_ID, f"✅ Розсилку завершено! Отримали: {success}")
     except: pass
 
-# --- КЛАВІАТУРИ ---
+# --- 3. КЛАВІАТУРА (Секретна для адміна) ---
 def get_main_keyboard(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add("🎲 Кинути кубик", "🏆 ТОП цієї групи", "📊 Статистика групи")
-    if user_id == ADMIN_ID:
+    
+    # Тільки ти бачиш цю кнопку
+    if int(user_id) == ADMIN_ID:
         markup.add("⚙️ АДМІН-МЕНЮ")
+        
     return markup
 
 def get_admin_inline_menu():
@@ -107,7 +108,7 @@ def start_cmd(message):
     update_data(message.from_user, message.chat)
     bot.send_message(
         message.chat.id, 
-        "🎰 Бот готовий! Використовуй кнопки нижче для гри:", 
+        "🎰 Бот готовий! Граємо:", 
         reply_markup=get_main_keyboard(message.from_user.id)
     )
 
@@ -116,8 +117,7 @@ def admin_calls(call):
     if call.from_user.id != ADMIN_ID: return
     conn = None
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+        conn = get_db_connection(); cur = conn.cursor()
         if call.data == "adm_stats":
             cur.execute("SELECT COUNT(DISTINCT user_id), SUM(sixes_count) FROM group_stats")
             u, s = cur.fetchone()
@@ -151,7 +151,15 @@ def handle_all(message):
     uid, cid, text = message.from_user.id, message.chat.id, message.text
     if uid in banned_users: return
 
-    # Адмін-логіка
+    # Захист адмін-панелі
+    if text == "⚙️ АДМІН-МЕНЮ":
+        if uid == ADMIN_ID:
+            bot.send_message(cid, "🛠 Адмін-панель:", reply_markup=get_admin_inline_menu())
+        else:
+            # Якщо звичайний юзер натиснув — просто скидаємо йому правильну клавіатуру
+            bot.send_message(cid, "❌ Доступ заборонено.", reply_markup=get_main_keyboard(uid))
+        return
+
     if uid == ADMIN_ID and uid in admin_states:
         state = admin_states.pop(uid)
         if state == "waiting_bc":
@@ -167,15 +175,15 @@ def handle_all(message):
 
     # Кнопки гравців
     if text == "🎲 Кинути кубик":
-        delete_after(cid, message.message_id, delay=0)
+        delete_after(cid, message.message_id, delay=0) # Миттєво видаляємо команду
         dice_msg = bot.send_dice(cid)
-        delete_after(cid, dice_msg.message_id, delay=120)
+        delete_after(cid, dice_msg.message_id, delay=120) # Кубик зникне через 2 хв
         
         update_data(message.from_user, message.chat, is_six=(dice_msg.dice.value == 6))
         
         time.sleep(3.5)
         res_msg = bot.send_message(cid, f"🎯 {message.from_user.first_name}, випало: {dice_msg.dice.value}!")
-        delete_after(cid, res_msg.message_id, delay=120)
+        delete_after(cid, res_msg.message_id, delay=120) # Текст зникне через 2 хв
 
     elif "ТОП" in text:
         delete_after(cid, message.message_id, delay=0)
@@ -184,11 +192,12 @@ def handle_all(message):
             conn = get_db_connection(); cur = conn.cursor()
             cur.execute("SELECT username, sixes_count FROM group_stats WHERE chat_id = %s AND sixes_count > 0 ORDER BY sixes_count DESC LIMIT 10", (cid,))
             rows = cur.fetchall(); cur.close()
-            if not rows: bot.send_message(cid, "🏆 Поки порожньо.")
+            if not rows: 
+                msg = bot.send_message(cid, "🏆 Поки порожньо.")
             else:
                 out = "🏆 **ТОП ГРУПИ:**\n\n" + "\n".join([f"{i+1}. {r[0]} — 🔥 `{r[1]}`" for i, r in enumerate(rows)])
-                res = bot.send_message(cid, out, parse_mode="Markdown")
-                delete_after(cid, res.message_id, delay=120)
+                msg = bot.send_message(cid, out, parse_mode="Markdown")
+            delete_after(cid, msg.message_id, delay=120)
         finally:
             if conn: release_db_connection(conn)
 
@@ -200,19 +209,17 @@ def handle_all(message):
             cur.execute("SELECT COUNT(*) FROM group_stats WHERE chat_id = %s", (cid,))
             total = cur.fetchone()[0]
             cur.close()
-            res = bot.send_message(cid, f"📊 У цій групі: `{total}` гравців.", parse_mode="Markdown")
-            delete_after(cid, res.message_id, delay=120)
+            msg = bot.send_message(cid, f"📊 У цій групі: `{total}` гравців.", parse_mode="Markdown")
+            delete_after(cid, msg.message_id, delay=120)
         except: pass
         finally:
             if conn: release_db_connection(conn)
 
-    elif text == "⚙️ АДМІН-МЕНЮ" and uid == ADMIN_ID:
-        bot.send_message(cid, "🛠 Адмін-панель:", reply_markup=get_admin_inline_menu())
-
+# --- 4. ЗАПУСК ---
 @app.route('/')
-def home(): return "Бот працює!"
+def home(): return "Бот ONLINE"
 
 if __name__ == "__main__":
     Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080))), daemon=True).start()
     print("🤖 Бот запущений!")
-    bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    bot.infinity_polling(timeout=20, long_polling_timeout=10)
