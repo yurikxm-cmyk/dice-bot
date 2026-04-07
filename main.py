@@ -22,7 +22,7 @@ def delete_after(chat_id, message_id, delay=120):
         try:
             bot.delete_message(chat_id, message_id)
         except Exception:
-            pass # Повідомлення вже видалено або немає прав
+            pass 
     threading.Thread(target=delayed_delete).start()
 
 # --- БАЗА ДАНИХ ---
@@ -77,9 +77,10 @@ def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- КЛАВІАТУРИ ---
+# --- НИЖНЯ ПАНЕЛЬ (Reply Keyboard) ---
 def get_main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    # Кнопки текстом, які з'являться замість звичайної клавіатури
     markup.add(
         types.KeyboardButton("🎲 Кинути кубик"),
         types.KeyboardButton("🏆 ТОП цієї групи"),
@@ -87,18 +88,34 @@ def get_main_keyboard():
     )
     return markup
 
+# --- АДМІН-КНОПКА (Inline) ---
 def get_admin_inline():
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("⚙️ АДМІН: Глобальна інфо", callback_data="admin_global"))
     return markup
 
-# --- ОБРОБКА ТЕКСТОВИХ КНОПОК ---
+# --- ОБРОБКА КОМАНДИ /START ---
+@bot.message_handler(commands=['start'])
+def welcome(message):
+    update_data(message.from_user, message.chat)
+    # Важливо: відправляємо reply_markup=get_main_keyboard(), щоб замінити інлайн-кнопки на нижню панель
+    msg = bot.send_message(
+        message.chat.id, 
+        "🎰 Бот активовано! Тепер кнопки знаходяться внизу, де зазвичай клавіатура.", 
+        reply_markup=get_main_keyboard()
+    )
+    delete_after(message.chat.id, message.message_id)
+    delete_after(message.chat.id, msg.message_id)
+    
+    if message.from_user.id == ADMIN_ID:
+        bot.send_message(message.chat.id, "Доступ адміна:", reply_markup=get_admin_inline())
+
+# --- ОБРОБКА КНОПОК З НИЖНЬОЇ ПАНЕЛІ ---
 @bot.message_handler(func=lambda m: m.text in ["🎲 Кинути кубик", "🏆 ТОП цієї групи", "📊 Статистика групи"])
 def handle_menu(message):
     chat_id = message.chat.id
-    user_id = message.from_user.id
     
-    # Видаляємо повідомлення-команду користувача через 2 хв
+    # Видаляємо повідомлення юзера через 2 хв
     delete_after(chat_id, message.message_id)
 
     if message.text == "🎲 Кинути кубик":
@@ -119,6 +136,7 @@ def handle_menu(message):
         cur.execute("SELECT username, sixes_count FROM group_stats WHERE chat_id = %s AND sixes_count > 0 ORDER BY sixes_count DESC LIMIT 10", (chat_id,))
         rows = cur.fetchall()
         cur.close(); conn.close()
+        
         text = "🏆 **ТОП ГРУПИ:**\n\n" + "\n".join([f"{i+1}. {r[0]} — {r[1]}" for i, r in enumerate(rows)]) if rows else "Поки пусто."
         msg = bot.send_message(chat_id, text, parse_mode="Markdown")
         delete_after(chat_id, msg.message_id)
@@ -132,19 +150,7 @@ def handle_menu(message):
         msg = bot.send_message(chat_id, f"📊 **У цій групі:** `{total}` гравців.", parse_mode="Markdown")
         delete_after(chat_id, msg.message_id)
 
-# --- КОМАНДИ ---
-@bot.message_handler(commands=['start'])
-def welcome(message):
-    update_data(message.from_user, message.chat)
-    msg = bot.reply_to(message, "🎰 Бот готовий! Використовуй кнопки знизу:", reply_markup=get_main_keyboard())
-    delete_after(message.chat.id, message.message_id)
-    delete_after(message.chat.id, msg.message_id)
-    
-    # Тільки адміну показуємо інлайн-кнопку
-    if message.from_user.id == ADMIN_ID:
-        bot.send_message(message.chat.id, "Доступ дозволено:", reply_markup=get_admin_inline())
-
-# --- ОБРОБКА CALLBACK (для адміна) ---
+# --- CALLBACK ДЛЯ АДМІНА ---
 @bot.callback_query_handler(func=lambda call: call.data == "admin_global")
 def admin_query(call):
     if call.from_user.id == ADMIN_ID:
